@@ -1,0 +1,18 @@
+# 预构建模式专用（Dockerfile.prebuilt.dockerignore，BuildKit 自动识别）：
+# 关键：不排除 .next（需要拷贝 standalone/static）；/node_modules 仅排除根目录，
+# 保留 .next/standalone/node_modules（standalone 自带的最小化运行时依赖）。
+/node_modules
+.next/cache
+src
+.git
+.github
+.env
+.env*.local
+*.log
+docs
+data
+*.tsbuildinfo
+Dockerfile
+Dockerfile.prebuilt
+docker-compose.yml
+docker-compose.prebuilt.yml

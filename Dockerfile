@@ -4,7 +4,8 @@ FROM node:24-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm ci --no-audit --no-fund
+# 国内网络加速：npmmirror 镜像源（仅构建期生效，产物与官方源完全一致）
+RUN npm ci --no-audit --no-fund --registry=https://registry.npmmirror.com
 
 COPY . .
 ENV DOCKER_BUILD=1

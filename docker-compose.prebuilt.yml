@@ -1,0 +1,7 @@
+# compose 覆盖层：与 docker-compose.yml 叠加使用，切换到本机预构建镜像。
+# 用法：docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d
+services:
+  libretv:
+    build:
+      context: .
+      dockerfile: Dockerfile.prebuilt

@@ -1,0 +1,30 @@
+# 预构建模式（快速部署）：
+# 产物必须先在本机生成：npm ci && npm run build（.next/standalone）
+# 本镜像容器内零编译，构建时间约 10-30 秒。
+# Node 版本需与本机一致（本项目要求 Node 24+，node:sqlite 依赖）。
+FROM node:24-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=8080
+ENV HOSTNAME=0.0.0.0
+
+RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
+
+# 直接拷贝本机已构建好的 standalone 产物（含最小化 node_modules）
+COPY .next/standalone ./
+COPY .next/static ./.next/static
+COPY public ./public
+
+# 删除 Windows 平台原生包（本机构建带入；项目未使用 next/image，sharp 不会被调用）
+RUN rm -rf node_modules/@img/sharp-win32-ia32 node_modules/@img/sharp-win32-x64
+
+# SQLite 数据目录（源检测结果 / 黑名单 / 我的片单）：挂卷持久化
+ENV LIBRETV_DATA_DIR=/app/data
+RUN mkdir -p /app/data && chown -R nextjs:nodejs /app/data
+VOLUME ["/app/data"]
+
+USER nextjs
+EXPOSE 8080
+CMD ["node", "server.js"]
