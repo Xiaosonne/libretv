@@ -2,6 +2,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { POST } from './route';
 import { SESSION_COOKIE, signSession } from '@/lib/auth';
 
+// search route 引入服务端 SQLite 黑名单（node:sqlite 内置模块）：
+// node 测试环境不初始化数据库，mock 为「无拉黑」
+vi.mock('@/lib/server/db', () => ({
+  isHostBlocked: vi.fn(() => false),
+}));
+
 /**
  * 聚合搜索接口单测：跨源聚合、同源去重、精确命中置顶、成人内容过滤、
  * 失败源不影响整体、SSRF 字面量拒绝。上游一律 mock fetch，无真实网络。

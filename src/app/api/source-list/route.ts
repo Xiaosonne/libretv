@@ -2,20 +2,33 @@ import { NextResponse } from 'next/server';
 import { guardRequest } from '@/lib/api-guard';
 import { checkLiveUrlAllowed, checkUpstreamAllowed, isValidProxyUrl } from '@/lib/ssrf';
 import { fetchUpstream } from '@/lib/fetch-utils';
-import { describeParseStats, parseSubscriptionJson, parseSubscriptionPayload, withSkipped } from '@/lib/tvbox-parser';
+import {
+  describeParseStats,
+  extractSubscribeUrls,
+  mergeSubscriptionPayloads,
+  parseSubscriptionJson,
+  parseSubscriptionPayload,
+  withSkipped,
+} from '@/lib/tvbox-parser';
 import type { SourceListPayload } from '@/lib/types';
 
 export const runtime = 'nodejs';
 
 /**
- * 拉取远程数据源订阅，自动识别两种格式：
+ * 拉取远程数据源订阅，自动识别三种格式：
  * 1. LibreTV-SourceList JSON：{ name?, sources: [点播源], liveSources: [直播源] }（也接受裸数组与老格式）；
  * 2. TVBOX 配置 JSON：{ sites: [站点], lives: [直播源] }，仅导入直连类条目
- *    （type=1 的 Apple CMS 接口与 M3U 直播），Spider / XML 等跳过并计入统计。
+ *    （type=1 的 Apple CMS 接口与 M3U 直播），Spider / XML 等跳过并计入统计；
+ * 3. TVBOX 聚合订阅 JSON：{ subscribe: [url|{url}] }（多配置聚合），逐个拉取子配置
+ *    合并导入——深度限定为 1 层，子配置中的再嵌套不展开。
  *
  * 点播源与直播源的地址放行策略不同（点播一律拒绝内网，直播可用 LIVE_ALLOW_PRIVATE 放行），
  * 因此两类分别校验，不能共用一把尺子；被校验拦下的条目同样计入统计，便于前端说明导入结果。
  */
+
+/** 聚合订阅最多展开的子配置数（防止恶意超大配置拖垮服务端） */
+const MAX_NESTED_SUBSCRIPTIONS = 10;
+
 export async function GET(req: Request) {
   const guarded = guardRequest(req);
   if (guarded) return guarded;
@@ -39,10 +52,23 @@ export async function GET(req: Request) {
     // 读文本而非 res.json()：部分配置带注释/尾随逗号，需要宽容解析
     const text = await res.text();
 
-    let parsed;
+    let json: unknown;
     try {
-      parsed = parseSubscriptionPayload(parseSubscriptionJson(text));
+      json = parseSubscriptionJson(text);
     } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : '订阅内容格式不正确' },
+        { status: 400 }
+      );
+    }
+
+    // 聚合订阅（顶层 subscribe/urls）：逐个拉取子配置合并；子配置解析失败跳过不阻断
+    const subUrls = extractSubscribeUrls(json);
+    let parsed: SourceListPayload;
+    try {
+      parsed = subUrls.length > 0 ? await resolveNestedSubscriptions(subUrls) : parseSubscriptionPayload(json);
+    } catch (err) {
+      // 格式无法解析 / 子配置全部失败：属于订阅内容问题，返回 400 并透出可读原因
       return NextResponse.json(
         { error: err instanceof Error ? err.message : '订阅内容格式不正确' },
         { status: 400 }
@@ -82,4 +108,37 @@ export async function GET(req: Request) {
       { status: 502 }
     );
   }
+}
+
+/** 拉取并合并聚合订阅的子配置（深度 1：子配置中的再嵌套不展开）；全失败时抛错 */
+async function resolveNestedSubscriptions(subUrls: string[]): Promise<SourceListPayload> {
+  const limited = subUrls.slice(0, MAX_NESTED_SUBSCRIPTIONS);
+  const payloads = await Promise.all(
+    limited.map(async (url) => {
+      try {
+        const verdict = await checkUpstreamAllowed(url);
+        if (!verdict.ok) return null;
+        const res = await fetchUpstream(url, { timeoutMs: 8000, headers: { Accept: 'application/json' } });
+        if (!res.ok) return null;
+        const child = parseSubscriptionJson(await res.text());
+        // 子配置仍是聚合订阅：不展开（深度限制），按无效配置跳过
+        if (extractSubscribeUrls(child).length > 0) return null;
+        return parseSubscriptionPayload(child);
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const ok = payloads.filter((p): p is SourceListPayload => p !== null);
+  if (ok.length === 0) {
+    throw new Error(`聚合订阅的 ${subUrls.length} 个子配置均拉取失败`);
+  }
+  const merged = mergeSubscriptionPayloads(ok);
+  // 拉取失败的子配置计入无效统计（每条按 1 个地址计）
+  const failedCount = limited.length - ok.length;
+  return {
+    ...merged,
+    stats: failedCount > 0 ? withSkipped(merged.stats, 'invalidUrl', failedCount) : merged.stats,
+  };
 }

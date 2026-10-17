@@ -482,8 +482,18 @@ export function VideoCard({ item, onClick }: { item: SearchResultItem; onClick: 
   );
 }
 
-/** 豆瓣推荐卡片（无来源徽章，点击直接搜索） */
-export function DoubanCard({ item, onClick }: { item: { title: string; cover: string; rating?: string }; onClick: () => void }) {
+/** 豆瓣推荐卡片（无来源徽章）：推荐区点击直接搜索；带 onToggleFavorite 时左上角显示收藏按钮 */
+export function DoubanCard({
+  item,
+  onClick,
+  favorited,
+  onToggleFavorite,
+}: {
+  item: { id?: string; title: string; cover: string; rating?: string; isTv?: boolean };
+  onClick: () => void;
+  favorited?: boolean;
+  onToggleFavorite?: () => void;
+}) {
   const imageProxyMode = useAppStore((s) => s.imageProxyMode);
   const customImageProxy = useAppStore((s) => s.customImageProxy);
   const [imgFailed, setImgFailed] = useState(false);
@@ -524,6 +534,33 @@ export function DoubanCard({ item, onClick }: { item: { title: string; cover: st
           <span className={cn('absolute top-1.5 right-1.5 tag bg-black/70 text-rating font-medium')}>
             ★ {item.rating}
           </span>
+        )}
+        {onToggleFavorite && (
+          <button
+            className={cn(
+              'absolute top-1.5 left-1.5 w-7 h-7 rounded-full flex items-center justify-center backdrop-blur-sm transition-colors',
+              favorited ? 'bg-accent text-on-accent' : 'bg-black/60 text-white/85 hover:text-accent'
+            )}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleFavorite();
+            }}
+            aria-label={favorited ? '取消收藏' : '收藏'}
+            aria-pressed={favorited}
+            title={favorited ? '从我的片单移除' : '收藏到我的片单'}
+          >
+            {/* 实心/空心随收藏态切换：Icon 组件固定 stroke 风格，这里内联以支持 fill */}
+            <svg
+              className="w-4 h-4"
+              viewBox="0 0 24 24"
+              fill={favorited ? 'currentColor' : 'none'}
+              stroke="currentColor"
+              strokeWidth={2}
+              aria-hidden
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12Z" />
+            </svg>
+          </button>
         )}
       </div>
       <div className="p-2">

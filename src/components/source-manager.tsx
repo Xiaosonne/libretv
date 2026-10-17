@@ -27,7 +27,7 @@ import { exportConfig, importConfig } from '@/lib/db';
 import { PERSIST_KEY } from '@/lib/persist-storage';
 import { copyToClipboard } from '@/lib/clipboard';
 import { useAuth } from './auth';
-import { api } from '@/lib/client-api';
+import { api, type BlockedSource, type InspectJobInfo, type SourceDetection } from '@/lib/client-api';
 import { syncSourceSubscription } from '@/lib/subscription-sync';
 import { describeParseStats } from '@/lib/tvbox-parser';
 
@@ -227,7 +227,127 @@ function VodSourcesPanel() {
   const { tests, runTest } = useSourceTests();
   const { progress, probe, cancel, isProbing } = useSourceProbe();
 
+  // —— 云端源检测中心（结果存服务端 SQLite，全设备共享） ——
+  const [detections, setDetections] = useState<Record<string, SourceDetection>>({});
+  const [blocked, setBlocked] = useState<BlockedSource[]>([]);
+  const [inspecting, setInspecting] = useState(false);
+  const [inspectProgress, setInspectProgress] = useState<InspectJobInfo['progress'] | null>(null);
+  const [rowInspecting, setRowInspecting] = useState<string | null>(null);
+  const [blockInput, setBlockInput] = useState('');
+  /** 检测数据至少成功加载过一次：决定黑名单管理区块是否展示（服务端不可用时不占空间） */
+  const [inspectionsReady, setInspectionsReady] = useState(false);
+
+  const applyInspections = useCallback((r: { detections: Record<string, SourceDetection>; blocked: BlockedSource[] }) => {
+    setDetections(r.detections);
+    setBlocked(r.blocked);
+    setInspectionsReady(true);
+  }, []);
+
+  const refreshInspections = useCallback(() => {
+    api.inspections().then(applyInspections).catch(() => {
+      /* 未登录/服务端不可用时静默：徽章不显示即可 */
+    });
+  }, [applyInspections]);
+
+  useEffect(() => {
+    refreshInspections();
+  }, [refreshInspections]);
+
+  /** 批量云端检测：POST 返回 jobId 后轮询进度，完成后刷新结果与黑名单 */
+  const runCloudInspect = async () => {
+    if (inspecting) return;
+    const urls = [...new Set(filtered.map((s) => s.url.replace(/\/+$/, '')))];
+    if (urls.length === 0) return;
+    setInspecting(true);
+    setInspectProgress({ total: urls.length, done: 0, ok: 0, suspicious: 0 });
+    try {
+      const started = await api.startInspect(urls);
+      let last = started.jobId
+        ? ({ total: urls.length, done: 0, ok: 0, suspicious: 0 } as InspectJobInfo['progress'])
+        : null;
+      if (started.jobId) {
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 1200));
+          const { job } = await api.inspectJob(started.jobId);
+          if (!job) break; // 服务端重启等原因任务丢失：退出轮询直接刷新结果
+          last = job.progress;
+          setInspectProgress(job.progress);
+          if (job.finishedAt) break;
+        }
+      }
+      refreshInspections();
+      if (last) {
+        toast(
+          `云端检测完成：可用 ${last.ok}、可疑 ${last.suspicious}，共 ${last.total} 个（结果全设备共享）`,
+          last.suspicious > 0 ? 'warning' : 'success'
+        );
+      }
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '云端检测失败', 'error');
+    } finally {
+      setInspecting(false);
+      setInspectProgress(null);
+    }
+  };
+
+  /** 单源云端检测（同步返回即时反馈），可疑源由服务端自动拉黑后需刷新黑名单 */
+  const inspectRow = async (rawUrl: string) => {
+    if (rowInspecting) return;
+    const url = rawUrl.replace(/\/+$/, '');
+    setRowInspecting(url);
+    try {
+      const r = await api.startInspect([url]);
+      if (r.single) {
+        setDetections((prev) => ({ ...prev, [r.single!.url]: r.single! }));
+        const d = r.single;
+        if (d.malware === 'suspicious') {
+          toast('疑似木马/劫持源，域名已自动拉黑', 'error');
+          refreshInspections();
+        } else if (d.ok) {
+          toast(`云端检测通过：${d.ms}ms${d.resultCount !== undefined ? ` · ${d.resultCount} 条结果` : ''}${d.qualityHeight ? ` · ${d.qualityHeight}p` : ''}`, 'success');
+        } else {
+          toast(d.error || '检测未通过', 'warning');
+        }
+      }
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '云端检测失败', 'error');
+    } finally {
+      setRowInspecting(null);
+    }
+  };
+
+  const manualBlock = async () => {
+    const host = blockInput.trim().toLowerCase();
+    if (!/^[a-z0-9.-]+$/.test(host)) {
+      toast('请输入合法域名，如 evil.example.com', 'warning');
+      return;
+    }
+    try {
+      await api.blockSource(host, '手动拉黑');
+      setBlockInput('');
+      refreshInspections();
+      toast(`已拉黑 ${host}，其源将不参与搜索`, 'success');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '拉黑失败', 'error');
+    }
+  };
+
+  const unblock = async (host: string) => {
+    try {
+      await api.unblockSource(host);
+      refreshInspections();
+      toast(`已解除 ${host}`, 'success');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '解除失败', 'error');
+    }
+  };
+
+
   const envKeys = useMemo(() => new Set(store.envSources.map((s) => s.key)), [store.envSources]);
+  const blockedHosts = useMemo(
+    () => new Map(blocked.map((b) => [b.host, b.reason || (b.origin === 'auto' ? '自动拉黑' : '手动拉黑')])),
+    [blocked]
+  );
   const all = useMemo(() => [...store.envSources, ...store.customAPIs], [store.envSources, store.customAPIs]);
 
   const filtered = useMemo(() => {
@@ -344,6 +464,14 @@ function VodSourcesPanel() {
               >
                 {isProbing ? '取消测活' : '批量测活'}
               </button>
+              <button
+                className="btn-ghost btn-sm"
+                onClick={() => void runCloudInspect()}
+                disabled={inspecting || filtered.length === 0}
+                title="云端检测：服务端检测可用性、画质与木马特征，结果存服务端供全设备共享"
+              >
+                {inspecting ? '云端检测中…' : '云端检测'}
+              </button>
               {/* 查看「已停用」时提供一键恢复，省去逐个点击 */}
               {filter === 'disabled' && (
                 <button className="btn-ghost btn-sm" onClick={restoreAll} disabled={filtered.length === 0}>
@@ -368,6 +496,20 @@ function VodSourcesPanel() {
                 </button>
               </div>
             )}
+            {inspectProgress && (
+              <div className="flex items-center gap-2 text-[11px] text-muted">
+                <div className="flex-1 h-1.5 bg-chip rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-accent transition-[width] duration-200"
+                    style={{ width: `${Math.round((inspectProgress.done / Math.max(1, inspectProgress.total)) * 100)}%` }}
+                  />
+                </div>
+                <span className="tabular-nums shrink-0">
+                  云检 {inspectProgress.done}/{inspectProgress.total} · 可用 {inspectProgress.ok}
+                  {inspectProgress.suspicious > 0 && ` · 可疑 ${inspectProgress.suspicious}`}
+                </span>
+              </div>
+            )}
           </div>
 
           {filtered.length === 0 ? (
@@ -387,6 +529,10 @@ function VodSourcesPanel() {
                     setEditing(null);
                   }}
                   testState={tests[source.key]}
+                  detection={detections[source.url.replace(/\/+$/, '')]}
+                  blockedReason={blockedHosts.get(hostnameOf(source.url))}
+                  inspecting={rowInspecting === source.url.replace(/\/+$/, '')}
+                  onInspect={() => void inspectRow(source.url)}
                   onTest={() =>
                     runTest(source.key, async () => {
                       const r = await api.testSource(source.url);
@@ -401,6 +547,54 @@ function VodSourcesPanel() {
               ))}
             </ul>
           )}
+
+          {/* 黑名单：木马/劫持源自动拉黑 + 手动维护，名单内的域名不参与任何搜索 */}
+          {inspectionsReady && (
+            <div className="mt-4 pt-3 border-t border-line">
+              <SectionTitle
+                title={`源黑名单${blocked.length > 0 ? `（${blocked.length}）` : ''}`}
+                hint="名单内的域名不参与搜索；木马/劫持源在云端检测后自动加入"
+              />
+              {blocked.length > 0 && (
+                <ul className="space-y-1.5 mb-2">
+                  {blocked.map((b) => (
+                    <li key={b.host} className="flex items-center gap-2 text-xs bg-card rounded-lg px-3 py-2">
+                      <span
+                        className={cn(
+                          'shrink-0 text-[10px] px-1.5 py-0.5 rounded',
+                          b.origin === 'auto' ? 'bg-danger/15 text-danger' : 'bg-chip text-faint'
+                        )}
+                      >
+                        {b.origin === 'auto' ? '自动' : '手动'}
+                      </span>
+                      <span className="font-medium text-content truncate">{b.host}</span>
+                      <span className="text-faint truncate flex-1 min-w-0" title={b.reason}>
+                        {b.reason}
+                      </span>
+                      <button className="btn-ghost btn-sm shrink-0" onClick={() => void unblock(b.host)}>
+                        解除
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex gap-2">
+                <input
+                  className="input flex-1 min-w-0 !py-1.5 text-xs"
+                  placeholder="手动拉黑域名，如 evil.example.com"
+                  value={blockInput}
+                  onChange={(e) => setBlockInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void manualBlock();
+                  }}
+                  aria-label="手动拉黑域名"
+                />
+                <button className="btn-ghost btn-sm shrink-0" onClick={() => void manualBlock()}>
+                  拉黑
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
     </section>
@@ -414,6 +608,64 @@ function formatEta(done: number, total: number, startedAt: number): string {
   return remainSec > 0 ? ` · 约 ${remainSec}s` : '';
 }
 
+/** 云端检测徽章：无结果显示「云检」占位，点击即触发该源的云端检测（可用性/画质/木马特征） */
+function CloudInspectBadge({
+  detection,
+  inspecting,
+  onInspect,
+}: {
+  detection?: SourceDetection;
+  inspecting: boolean;
+  onInspect: () => void;
+}) {
+  if (inspecting) return <Spinner size="sm" />;
+  if (!detection) {
+    return (
+      <button
+        className="text-[10px] px-1.5 py-0.5 rounded bg-chip text-faint hover:text-accent transition-colors shrink-0"
+        onClick={onInspect}
+        title="云端检测：服务端检测可用性/画质/木马特征，结果全设备共享"
+      >
+        云检
+      </button>
+    );
+  }
+  if (detection.ok) {
+    const bits = [`✓ ${detection.ms ?? '?'}ms`];
+    if (detection.resultCount !== undefined) bits.push(`${detection.resultCount}条`);
+    if (detection.qualityHeight) bits.push(`${detection.qualityHeight}p`);
+    return (
+      <button
+        className="text-[10px] px-1.5 py-0.5 rounded bg-success/15 text-success shrink-0 whitespace-nowrap"
+        onClick={onInspect}
+        title={`云端检测 ${formatRelativeTime(detection.checkedAt)}：可用${detection.malware === 'clean' ? ' · 未发现木马特征' : ''} · 点击重新检测`}
+      >
+        {bits.join(' ')}
+      </button>
+    );
+  }
+  if (detection.malware === 'suspicious') {
+    return (
+      <button
+        className="text-[10px] px-1.5 py-0.5 rounded bg-danger/15 text-danger shrink-0"
+        onClick={onInspect}
+        title={`${detection.malwareReason ?? '疑似木马/劫持源'} · 域名已自动拉黑 · 点击重新检测`}
+      >
+        ⚠ 可疑
+      </button>
+    );
+  }
+  return (
+    <button
+      className="text-[10px] px-1.5 py-0.5 rounded bg-warning/15 text-warning shrink-0"
+      onClick={onInspect}
+      title={`${detection.error ?? '检测未通过'} · 点击重新检测`}
+    >
+      ✗ 失败
+    </button>
+  );
+}
+
 /** 单条点播源行：勾选 / 名称标签 / 健康度 / 探活 / 编辑删除（订阅源与预置源按来源限制操作） */
 function VodSourceRow({
   api,
@@ -424,6 +676,10 @@ function VodSourceRow({
   onUpdate,
   testState,
   onTest,
+  detection,
+  blockedReason,
+  inspecting,
+  onInspect,
 }: {
   api: SourceConfig;
   isEnv: boolean;
@@ -433,6 +689,12 @@ function VodSourceRow({
   onUpdate: (data: { name: string; url: string; detail?: string; isAdult?: boolean }) => void;
   testState?: TestState;
   onTest: () => void;
+  /** 云端检测结果（服务端 SQLite，全设备共享；无结果时徽章为「云检」入口） */
+  detection?: SourceDetection;
+  /** 该源域名被拉黑的原因；undefined = 未拉黑 */
+  blockedReason?: string;
+  inspecting: boolean;
+  onInspect: () => void;
 }) {
   const selected = useAppStore((s) => s.selectedKeys.includes(api.key));
   const yellowFilter = useAppStore((s) => s.yellowFilter);
@@ -485,6 +747,14 @@ function VodSourceRow({
           <div className="text-sm font-medium text-content truncate">
             {api.name}
             {api.isAdult && <span className="text-pink-400 text-xs ml-1">(18+)</span>}
+            {blockedReason && (
+              <span
+                className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-danger/15 text-danger align-middle"
+                title={blockedReason}
+              >
+                已拉黑
+              </span>
+            )}
             {isEnv && (
               <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-chip text-faint align-middle">
                 部署者预置
@@ -501,6 +771,7 @@ function VodSourceRow({
           </div>
           <div className="text-xs text-faint truncate">{api.url}</div>
         </div>
+        <CloudInspectBadge detection={detection} inspecting={inspecting} onInspect={onInspect} />
         <HealthBadge sourceKey={api.key} />
         <TestBadge
           state={testState}

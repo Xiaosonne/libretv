@@ -35,6 +35,63 @@ export interface LiveProbeResult {
   kbps?: number;
 }
 
+/** —— 云端源检测中心（/api/source/inspect，结果存服务端 SQLite，全设备共享） —— */
+
+/** 单源云端检测结果（可用性 / 画质 / 病毒特征） */
+export interface SourceDetection {
+  url: string;
+  ok: boolean;
+  ms?: number;
+  resultCount?: number;
+  error?: string;
+  qualityHeight?: number;
+  malware: 'unknown' | 'clean' | 'suspicious';
+  malwareReason?: string;
+  checkedAt: number;
+}
+
+/** 被拉黑的源域名（自动识别木马源拉黑 + 手动维护） */
+export interface BlockedSource {
+  host: string;
+  reason?: string;
+  origin: 'auto' | 'manual';
+  createdAt: number;
+}
+
+/** 批量云端检测任务进度 */
+export interface InspectJobInfo {
+  id: string;
+  progress: { total: number; done: number; ok: number; suspicious: number };
+  startedAt: number;
+  finishedAt?: number;
+}
+
+/** 我的片单条目（与服务端 SQLite favorites 表同构） */
+export interface FavoriteRowDTO {
+  id: string;
+  title: string;
+  cover?: string;
+  rating?: string;
+  isTv?: boolean;
+  doubanId?: string;
+  addedAt: number;
+  updatedAt: number;
+}
+
+/** 豆瓣条目详情（片单详情弹窗用；解析失败时调用方降级展示条目基本信息） */
+export interface DoubanDetail {
+  id: string;
+  title: string;
+  year?: string;
+  region?: string;
+  genres?: string[];
+  directors?: string[];
+  actors?: string[];
+  rating?: string;
+  summary?: string;
+  cover?: string;
+}
+
 /** /api/status 的 React Query key：Providers 与 AuthProvider 共用，避免同一页面重复请求 */
 export const STATUS_QUERY_KEY = ['app-status'] as const;
 
@@ -181,6 +238,10 @@ export const api = {
     return request<DoubanResponse>(`/api/hot-list?${sp.toString()}`, { signal });
   },
 
+  /** 豆瓣条目详情：片单详情弹窗按需补全简介/演职员等信息 */
+  doubanDetail: (id: string, signal?: AbortSignal) =>
+    request<DoubanDetail>(`/api/douban/detail?id=${encodeURIComponent(id)}`, { signal }),
+
   /** 换源：按标题跨源搜索并取详情，附带接口耗时（测速）；支持 signal 以便关闭弹窗时中止在途请求 */
   detailSpeed: async (id: string, source: SourceConfig, signal?: AbortSignal) => {
     const start = performance.now();
@@ -217,6 +278,60 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+
+  /** —— 云端源检测中心 —— */
+
+  /** 查询全部检测结果 + 黑名单 */
+  inspections: () =>
+    request<{ detections: Record<string, SourceDetection>; blocked: BlockedSource[] }>('/api/source/inspect'),
+
+  /**
+   * 触发云端检测：单条同步返回 single；多条异步执行返回 jobId（用 inspectJob 轮询）。
+   * 结果写入服务端 SQLite，所有设备共享。
+   */
+  startInspect: (urls: string[]) =>
+    request<{ single?: SourceDetection; jobId?: string; total?: number }>('/api/source/inspect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls }),
+    }),
+
+  /** 查询批量检测任务进度；job 不存在（已过期/重启丢失）返回 job: null */
+  inspectJob: (jobId: string) => request<{ job: InspectJobInfo | null }>(`/api/source/inspect?job=${encodeURIComponent(jobId)}`),
+
+  /** 手动拉黑源域名（origin=manual，与木马自动拉黑区分） */
+  blockSource: (host: string, reason?: string) =>
+    request<{ ok: boolean }>('/api/source/inspect', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'block', host, reason }),
+    }),
+
+  /** 解除拉黑 */
+  unblockSource: (host: string) =>
+    request<{ ok: boolean }>('/api/source/inspect', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'unblock', host }),
+    }),
+
+  /** —— 我的片单（云端镜像，单密码部署全家共享） —— */
+
+  listFavorites: () => request<{ list: FavoriteRowDTO[] }>('/api/user/favorites'),
+
+  pushFavorite: (entry: FavoriteRowDTO) =>
+    request<{ ok: boolean }>('/api/user/favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry),
+    }),
+
+  deleteFavorite: (id: string) =>
+    request<{ ok: boolean }>(`/api/user/favorites?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** 生成遥控输入配对码（TV 端调用；手机端以配对码作为凭证，无需登录） */
+  createRemotePair: () =>
+    request<{ pair: string; expiresAt: number }>('/api/remote/pair', { method: 'POST' }),
 
   /** —— 直播 / IPTV —— */
 

@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 
 export type IconName =
   | 'close'
+  | 'remote'
   | 'edit'
   | 'refresh'
   | 'bolt'
@@ -24,10 +25,20 @@ export type IconName =
   | 'link'
   | 'alert'
   | 'gear'
-  | 'home';
+  | 'home'
+  | 'heart'
+  | 'play';
 
 const PATHS: Record<IconName, ReactNode> = {
   close: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />,
+  remote: (
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={2}
+      d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.829 5.724L10.5 14.25H8.25v3.75l-1.5 1.5H4.5v2.25H1.5v-3.027c0-.597.237-1.17.659-1.591l6.499-6.499A6 6 0 1 1 21.75 8.25Z"
+    />
+  ),
   edit: (
     <path
       strokeLinecap="round"
@@ -139,6 +150,22 @@ const PATHS: Record<IconName, ReactNode> = {
       strokeLinejoin="round"
       strokeWidth={2}
       d="m2.25 12 8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75"
+    />
+  ),
+  heart: (
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={2}
+      d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12Z"
+    />
+  ),
+  play: (
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={2}
+      d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.985V5.653Z"
     />
   ),
 };

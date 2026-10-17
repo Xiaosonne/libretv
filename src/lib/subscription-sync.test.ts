@@ -8,9 +8,13 @@ vi.mock('./db', () => ({
   saveLiveProbeResults: vi.fn(async () => {}),
 }));
 
-// 订阅内容由服务端代理拉取（需登录），测试中直接 mock
+// 订阅内容由服务端代理拉取（需登录），测试中直接 mock；
+// startInspect 为「导入即检测」的后台触发，测试中只记录调用不产生网络
 vi.mock('./client-api', () => ({
-  api: { fetchSourceList: vi.fn() },
+  api: {
+    fetchSourceList: vi.fn(),
+    startInspect: vi.fn(async () => ({ jobId: 'ins_test', total: 2 })),
+  },
 }));
 
 import { api } from './client-api';

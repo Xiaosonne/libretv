@@ -3,6 +3,7 @@ import { guardRequest } from '@/lib/api-guard';
 import { cmsRequestHeaders, filterAdultResults, filterRelevantResults, normalizeTitle, parseSearchList } from '@/lib/cms-parser';
 import { fetchUpstream, getCache, setCache } from '@/lib/fetch-utils';
 import { checkUpstreamAllowed } from '@/lib/ssrf';
+import { isHostBlocked } from '@/lib/server/db';
 import type { SearchResponse, SearchStreamEvent, SourceConfig, SourceSearchOutcome } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -70,6 +71,10 @@ async function searchSource(source: SourceConfig, wd: string): Promise<SourceSea
   const verdict = await checkUpstreamAllowed(source.url);
   if (!verdict.ok) {
     return finish({ sourceKey: source.key, ok: false, list: [], error: verdict.reason });
+  }
+  // 云端黑名单兜底：木马/劫持源不论前端是否勾选都不参与搜索（原因通过 failures 透出）
+  if (isHostBlocked(source.url)) {
+    return finish({ sourceKey: source.key, ok: false, list: [], error: '域名已被拉黑（疑似木马/劫持源），可在源管理中解除' });
   }
 
   // 死线到点中断该源所有在途分页请求，避免后台继续空耗

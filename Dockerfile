@@ -1,5 +1,6 @@
 # ---- 构建阶段 ----
-FROM node:22-alpine AS builder
+# node:24+：node:sqlite（DatabaseSync）需 Node 22.5+ 且 24 起标记为稳定
+FROM node:24-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
@@ -11,7 +12,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # ---- 运行阶段 ----
-FROM node:22-alpine AS runner
+FROM node:24-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
@@ -25,6 +26,11 @@ RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
+
+# SQLite 数据目录（源检测结果 / 黑名单 / 我的片单）：挂卷持久化
+ENV LIBRETV_DATA_DIR=/app/data
+RUN mkdir -p /app/data && chown -R nextjs:nodejs /app/data
+VOLUME ["/app/data"]
 
 USER nextjs
 

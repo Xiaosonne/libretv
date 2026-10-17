@@ -40,6 +40,19 @@ export interface SearchHistoryEntry {
   timestamp: number;
 }
 
+/** 我的片单条目（本地 IndexedDB + 服务端 SQLite 双写，单密码部署全家共享一份） */
+export interface FavoriteEntry {
+  /** 主键：豆瓣来源 `db_${subjectId}`；无豆瓣信息时 `n_${title}` */
+  id: string;
+  title: string;
+  cover?: string;
+  rating?: string;
+  isTv?: boolean;
+  doubanId?: string;
+  addedAt: number;
+  updatedAt: number;
+}
+
 export interface SegmentMetaEntry {
   /** Cache Storage 中的 key（归一化的分片绝对地址，或同源代理地址） */
   key: string;
@@ -77,6 +90,7 @@ export const db = new Dexie('libretv') as Dexie & {
   liveProbe: EntityTable<LiveProbeEntry & { url: string }, 'url'>;
   segmentMeta: EntityTable<SegmentMetaEntry, 'key'>;
   downloads: EntityTable<DownloadTaskEntry, 'id'>;
+  favorites: EntityTable<FavoriteEntry, 'id'>;
 };
 
 db.version(1).stores({
@@ -94,6 +108,11 @@ db.version(2).stores({
 db.version(3).stores({
   segmentMeta: 'key, episodeKey, lastAccess',
   downloads: 'id, createdAt',
+});
+
+// v4：我的片单（本地 IndexedDB；服务端另有 SQLite 镜像做云端同步）
+db.version(4).stores({
+  favorites: 'id, addedAt',
 });
 
 export const MAX_HISTORY = 100;
@@ -180,6 +199,20 @@ export async function removeSearchHistory(text: string): Promise<void> {
 
 export async function clearSearchHistory(): Promise<void> {
   await db.searchHistory.clear();
+}
+
+// —— 我的片单（本地 CRUD；云端同步逻辑在 favorites.ts） ——
+
+export async function putFavorite(entry: FavoriteEntry): Promise<void> {
+  await db.favorites.put(entry);
+}
+
+export async function removeFavoriteEntry(id: string): Promise<void> {
+  await db.favorites.delete(id);
+}
+
+export async function allFavorites(): Promise<FavoriteEntry[]> {
+  return db.favorites.orderBy('addedAt').reverse().toArray();
 }
 
 /** 撤销「清空搜索记录」：按原时间戳回填，保持原有顺序 */

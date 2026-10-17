@@ -206,7 +206,85 @@ export function isTvboxPayload(json: unknown): boolean {
 }
 
 /**
- * 解析订阅 JSON：自动识别格式（先判 TVBOX，后判 LibreTV-SourceList）。
+ * 提取嵌套订阅地址（TVBOX 多配置聚合格式）：顶层 `subscribe` / `urls` / `subscription`
+ * 数组，元素为 URL 字符串或 { url } 对象。聚合配置本身没有 sites / lives，
+ * 需由调用方逐个拉取子配置再合并（网络与 SSRF 校验同样在调用方，本层只做提取）。
+ */
+export function extractSubscribeUrls(json: unknown): string[] {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return [];
+  const record = json as Record<string, unknown>;
+  for (const key of ['subscribe', 'urls', 'subscription']) {
+    const raw = record[key];
+    if (!Array.isArray(raw)) continue;
+    const urls = raw
+      .map((item) => {
+        if (typeof item === 'string') return item.trim();
+        if (item && typeof item === 'object' && !Array.isArray(item)) {
+          return optionalString((item as Record<string, unknown>).url) ?? '';
+        }
+        return '';
+      })
+      .filter((u) => /^https?:\/\//i.test(u));
+    if (urls.length > 0) return [...new Set(urls)];
+  }
+  return [];
+}
+
+/**
+ * 合并多个子订阅的解析结果（嵌套聚合订阅场景）：
+ * 源按 URL 去重（先到先得）、统计累加，总量受本站上限约束。
+ * 子配置可以是 LibreTV-SourceList 或 TVBOX 任意一种格式。
+ */
+export function mergeSubscriptionPayloads(payloads: SourceListPayload[], name?: string): SourceListPayload {
+  const seenVod = new Set<string>();
+  const seenLive = new Set<string>();
+  const sources: SourceListPayload['sources'] = [];
+  const liveSources: SourceListPayload['liveSources'] = [];
+  let truncated = 0;
+  let skipped = 0;
+  const skippedByReason: Partial<Record<SubscriptionSkipReason, number>> = {};
+
+  for (const p of payloads) {
+    for (const s of p.sources) {
+      if (seenVod.has(s.url)) continue;
+      if (sources.length >= MAX_VOD_SOURCES) {
+        truncated += 1;
+        continue;
+      }
+      seenVod.add(s.url);
+      sources.push(s);
+    }
+    for (const s of p.liveSources) {
+      if (seenLive.has(s.url)) continue;
+      if (liveSources.length >= MAX_LIVE_SOURCES) {
+        truncated += 1;
+        continue;
+      }
+      seenLive.add(s.url);
+      liveSources.push(s);
+    }
+    skipped += p.stats?.skipped ?? 0;
+    for (const [reason, count] of Object.entries(p.stats?.skippedByReason ?? {})) {
+      if (typeof count !== 'number' || count <= 0) continue;
+      const key = reason as SubscriptionSkipReason;
+      skippedByReason[key] = (skippedByReason[key] ?? 0) + count;
+    }
+  }
+
+  return {
+    name,
+    sources,
+    liveSources,
+    stats: {
+      format: 'tvbox',
+      skipped,
+      skippedByReason,
+      truncated,
+    },
+  };
+}
+
+/** 解析订阅 JSON：自动识别格式（先判 TVBOX，后判 LibreTV-SourceList）。
  * 两者均不匹配时由 parseSourceListPayload 抛出格式错误。
  */
 export function parseSubscriptionPayload(json: unknown): SourceListPayload {

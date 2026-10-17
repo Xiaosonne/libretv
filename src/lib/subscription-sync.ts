@@ -47,6 +47,10 @@ export async function syncSourceSubscription(rawUrl: string): Promise<Subscripti
     }
     store.addSubscription(url, name);
     store.markSubscriptionSynced(url, name, { vod: vodCount, live: liveCount });
+    // 导入即检测：同步成功后后台触发云端检测（可用性/画质/木马特征，结果落库全设备共享）。
+    // 不等待不轮询——徽章在下次打开源管理时可见，服务端巡检也会接管后续复检。
+    const inspecting = api.startInspect?.(sources.map((s) => s.url));
+    inspecting?.catch(() => {});
     return { name, vodCount, liveCount, stats };
   } catch (err) {
     // 记录失败状态供订阅列表展示（首次添加未成功时不产生条目）；已导入的旧数据保持不动

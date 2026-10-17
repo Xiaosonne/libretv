@@ -9,8 +9,10 @@ services:
     container_name: libretv
     restart: unless-stopped
     ports:
-      - "8080:8080"
-    # 无状态服务：观看历史在浏览器 IndexedDB、设置在 localStorage，无需挂载卷
+      - "8899:8080"
+    # 持久化：SQLite（源检测结果 / 拉黑名单 / 我的片单云端镜像）。宿主目录 ./data
+    volumes:
+      - ./data:/app/data
     environment:
       # 必填：访问密码（在 .env 中设置，缺失时 compose 启动即报错提醒）
       - PASSWORD=${PASSWORD:?请在 .env 中设置 PASSWORD}
@@ -39,3 +41,8 @@ services:
       # - USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36
       # 可选：影视榜单推荐源（60s API）实例地址，官方公共实例有限流
       # - 60S_API_BASE=https://60s.crystelf.top
+      # 可选：源自动巡检开关与间隔（默认开启，每 6 小时复检一轮库内已登记源）
+      # - SOURCE_AUTO_INSPECT=1
+      # - SOURCE_INSPECT_INTERVAL_MS=21600000
+      # 可选：调试
+      # - DEBUG=false

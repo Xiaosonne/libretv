@@ -16,6 +16,9 @@ import { useToast } from '@/components/toast';
 import { EmptyState } from '@/components/states';
 import { Icon } from '@/components/icon';
 import { SiteFooter } from '@/components/site-footer';
+import { useAuth } from '@/components/auth';
+import { syncFavorites } from '@/lib/favorites';
+import { useRemotePairing } from '@/components/remote-pair-dialog';
 
 /**
  * 首页：搜索（URL ?s= 驱动，可后退/分享）+ 豆瓣推荐。
@@ -55,6 +58,12 @@ function HomeContent() {
   useEffect(() => {
     if (urlQuery) setInput(urlQuery);
   }, [urlQuery]);
+
+  // 登录后同步我的片单（本地 IndexedDB ⇆ 服务端 SQLite，全家共享一份）
+  const { verified } = useAuth();
+  useEffect(() => {
+    if (verified) void syncFavorites();
+  }, [verified]);
 
   // 源名回显：失败/停用提示里显示友好名称而非裸 key
   const sourceName = (key: string) =>
@@ -141,6 +150,19 @@ function HomeContent() {
   };
 
   const isSearching = Boolean(urlQuery) && searchQuery.isFetching && !searchQuery.data;
+
+  // 手机遥控输入：扫码后手机端可直接向本页输入文字 / 触发搜索（能力描述 + 能力调用）
+  const remotePairing = useRemotePairing({
+    onInput: (text: string) => setInput(text),
+    onSearch: (text: string) => {
+      setInput(text);
+      runSearch(text);
+    },
+    onClear: () => {
+      setInput('');
+      inputRef.current?.focus();
+    },
+  });
   // 聚合数据未就绪时，用已结算源的结果增量渲染（健康源不再等坏源超时）
   const streamedList = useMemo(
     () => streamedOutcomes.flatMap((o) => o.list),
@@ -250,6 +272,16 @@ function HomeContent() {
                     <Icon name="close" className="w-4 h-4" />
                   </button>
                 )}
+                {/* 遥控输入：手机扫码后可向本页输入文字/触发搜索（电视端打字不便的替代方案） */}
+                <button
+                  type="button"
+                  className="shrink-0 self-center mr-1 p-1.5 rounded-full text-faint hover:text-accent hover:bg-hover transition-colors"
+                  onClick={remotePairing.openDialog}
+                  aria-label="手机遥控输入"
+                  title="手机遥控输入：扫码后用手机向搜索框输入文字"
+                >
+                  <Icon name="remote" className="w-4 h-4" />
+                </button>
                 {/* 主操作按钮：贴合搜索框右端——右侧圆角跟随容器、左侧直角，展开时右下角
                     跟着容器一起改直角；按压改用亮度反馈（缩放会让贴合边缘露出缝隙） */}
                 <button
@@ -378,6 +410,7 @@ function HomeContent() {
       <SiteFooter />
 
       <DetailModal item={detailItem} onClose={() => setDetailItem(null)} />
+      {remotePairing.dialog}
     </div>
   );
 }
