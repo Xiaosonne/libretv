@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   createPair,
+  DEFAULT_CAPABILITIES,
   dispatchAction,
+  getPairCapabilities,
   isValidPair,
-  REMOTE_CAPABILITIES,
+  sanitizeCapabilities,
   subscribePair,
   unsubscribePair,
 } from './remote-pairing';
@@ -27,12 +29,39 @@ afterEach(() => {
 });
 
 describe('createPair', () => {
-  it('生成 6 位数字码与 10 分钟有效期，能力描述随码下发', () => {
+  it('生成 6 位数字码与 10 分钟有效期，未声明能力时回落搜索页默认描述', () => {
     const { pair, expiresAt, capabilities } = createPair();
     expect(pair).toMatch(/^\d{6}$/);
     expect(expiresAt - Date.now()).toBeGreaterThan(9 * 60 * 1000);
-    expect(capabilities).toBe(REMOTE_CAPABILITIES);
+    expect(capabilities).toBe(DEFAULT_CAPABILITIES);
+    expect(getPairCapabilities(pair)).toBe(DEFAULT_CAPABILITIES);
     expect(isValidPair(pair)).toBe(true);
+  });
+
+  it('TV 端声明的能力经清洗后随配对码存取（订阅页场景）', () => {
+    const caps = sanitizeCapabilities({
+      pageName: '数据源订阅',
+      placeholder: '粘贴订阅链接…',
+      confirmLabel: '同步订阅',
+      clearLabel: '清空输入框',
+      inputMode: 'url',
+      hint: '电视端将立即导入该订阅',
+    });
+    const { pair } = createPair(caps);
+    expect(getPairCapabilities(pair)).toEqual(caps);
+  });
+
+  it('能力描述过白名单：未知字段丢弃、超长截断、空值回落默认', () => {
+    const caps = sanitizeCapabilities({
+      pageName: 'x'.repeat(50),
+      placeholder: '',
+      evil: '垃圾字段',
+      inputMode: 'javascript:',
+    });
+    expect(caps.pageName).toHaveLength(20);
+    expect(caps.placeholder).toBe(DEFAULT_CAPABILITIES.placeholder);
+    expect(caps.inputMode).toBe('text');
+    expect('evil' in caps).toBe(false);
   });
 
   it('存续期内不生成重复码', () => {

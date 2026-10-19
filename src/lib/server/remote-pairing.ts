@@ -20,16 +20,53 @@ export interface RemoteEvent {
   text?: string;
 }
 
-/** 本页能力描述（第一版：输入 + 搜索；后续可按页面动态注册更多能力） */
-export const REMOTE_CAPABILITIES = {
-  page: '/',
+/**
+ * 单次配对的能力描述（TV 端打开面板时声明，手机端按声明渲染）。
+ * - action id 固定为 input/search/clear 三种（白名单），语义上 search =「确认/主操作」；
+ * - 展示文案（页面名/占位符/按钮标签）由 TV 端按所在页面声明，同一套动作即可服务
+ *   搜索框（确认=搜索）、订阅输入框（确认=同步订阅）等不同场景。
+ */
+export interface RemoteCapabilities {
+  /** TV 端页面名（手机端标题展示） */
+  pageName: string;
+  /** 手机端输入框占位文案 */
+  placeholder: string;
+  /** 主操作按钮文案（action=search），如「电视端搜索」/「同步订阅」 */
+  confirmLabel: string;
+  /** 清空按钮文案 */
+  clearLabel: string;
+  /** 输入框 inputmode：URL 场景用 url 键盘 */
+  inputMode?: 'text' | 'url';
+  /** 底部说明文字（可省） */
+  hint?: string;
+}
+
+/** 默认能力描述：搜索页（TV 端不声明时使用，保持旧行为） */
+export const DEFAULT_CAPABILITIES: RemoteCapabilities = {
   pageName: '搜索页',
-  actions: [
-    { id: 'input', label: '输入文字', withText: true, description: '手机端输入实时同步到电视搜索框' },
-    { id: 'search', label: '搜索', withText: true, description: '电视端用当前文字立即发起搜索' },
-    { id: 'clear', label: '清空', withText: false, description: '清空电视端搜索框' },
-  ],
-} as const;
+  placeholder: '输入要搜索的片名…',
+  confirmLabel: '电视端搜索',
+  clearLabel: '清空搜索框',
+  inputMode: 'text',
+  hint: '输入内容会实时显示在电视搜索框上；点击「电视端搜索」立即在电视上发起搜索。',
+};
+
+/** TV 端声明的能力需过白名单清洗：只保留四种文案字段并限长，防止垃圾内容经二维码投屏 */
+export function sanitizeCapabilities(raw: unknown): RemoteCapabilities {
+  const input = (raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown, fallback: string, max: number) => {
+    const s = typeof v === 'string' ? v.trim().slice(0, max) : '';
+    return s || fallback;
+  };
+  return {
+    pageName: str(input.pageName, DEFAULT_CAPABILITIES.pageName, 20),
+    placeholder: str(input.placeholder, DEFAULT_CAPABILITIES.placeholder, 40),
+    confirmLabel: str(input.confirmLabel, DEFAULT_CAPABILITIES.confirmLabel, 20),
+    clearLabel: str(input.clearLabel, DEFAULT_CAPABILITIES.clearLabel, 20),
+    inputMode: input.inputMode === 'url' ? 'url' : 'text',
+    hint: str(input.hint, DEFAULT_CAPABILITIES.hint ?? '', 80),
+  };
+}
 
 const PAIR_TTL_MS = 10 * 60 * 1000;
 const MAX_TEXT_LENGTH = 200;
@@ -37,6 +74,8 @@ const MAX_TEXT_LENGTH = 200;
 interface PairSession {
   createdAt: number;
   expiresAt: number;
+  /** 本次配对声明的能力描述（手机端能力面板的渲染来源） */
+  capabilities: RemoteCapabilities;
   /** SSE 订阅回调；TV 端断开或超时后为 undefined */
   subscriber?: (event: RemoteEvent) => void;
 }
@@ -58,19 +97,26 @@ function sweep(): void {
 export interface PairInfo {
   pair: string;
   expiresAt: number;
-  capabilities: typeof REMOTE_CAPABILITIES;
+  capabilities: RemoteCapabilities;
 }
 
-/** 生成新配对码（6 位数字，不与存活中的码重复） */
-export function createPair(): PairInfo {
+/** 生成新配对码（6 位数字，不与存活中的码重复），并登记本次会话的能力描述 */
+export function createPair(capabilities?: RemoteCapabilities): PairInfo {
   sweep();
   let code: string;
   do {
     code = String(Math.floor(100000 + Math.random() * 900000));
   } while (sessions().has(code));
   const now = Date.now();
-  sessions().set(code, { createdAt: now, expiresAt: now + PAIR_TTL_MS });
-  return { pair: code, expiresAt: now + PAIR_TTL_MS, capabilities: REMOTE_CAPABILITIES };
+  const caps = capabilities ?? DEFAULT_CAPABILITIES;
+  sessions().set(code, { createdAt: now, expiresAt: now + PAIR_TTL_MS, capabilities: caps });
+  return { pair: code, expiresAt: now + PAIR_TTL_MS, capabilities: caps };
+}
+
+/** 手机端拉取能力描述；配对码无效时返回 null */
+export function getPairCapabilities(pair: string): RemoteCapabilities | null {
+  sweep();
+  return sessions().get(pair)?.capabilities ?? null;
 }
 
 /** 校验配对码：存在且未过期 */

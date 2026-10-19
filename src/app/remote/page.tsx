@@ -29,10 +29,29 @@ type Phase =
   | { kind: 'invalid'; message: string }
   | { kind: 'ready'; connectedHint: string };
 
+/** TV 端声明的能力描述；旧版服务端未下发时回落到搜索页默认面板 */
+interface Caps {
+  pageName: string;
+  placeholder: string;
+  confirmLabel: string;
+  clearLabel: string;
+  inputMode: 'text' | 'url';
+  hint: string;
+}
+const DEFAULT_CAPS: Caps = {
+  pageName: '搜索页',
+  placeholder: '输入要搜索的片名…',
+  confirmLabel: '电视端搜索',
+  clearLabel: '清空搜索框',
+  inputMode: 'text',
+  hint: '输入内容会实时显示在电视搜索框上；点击「电视端搜索」立即在电视上发起搜索。',
+};
+
 function RemoteContent() {
   const searchParams = useSearchParams();
   const pair = (searchParams.get('pair') || '').trim();
   const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
+  const [caps, setCaps] = useState<Caps>(DEFAULT_CAPS);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,12 +67,14 @@ function RemoteContent() {
           if (!cancelled) setPhase({ kind: 'invalid', message: '配对码格式不正确，请重新扫码' });
           return;
         }
-        const data = (await res.json()) as { valid: boolean };
+        const data = (await res.json()) as { valid: boolean; capabilities?: Partial<Caps> };
         if (cancelled) return;
         if (!data.valid) {
           setPhase({ kind: 'invalid', message: '配对码不存在或已过期（10 分钟有效），请在电视端重新打开配对面板' });
           return;
         }
+        // 能力描述以 TV 端声明为准（服务端已过白名单），缺失字段回落默认值
+        setCaps({ ...DEFAULT_CAPS, ...data.capabilities });
         setPhase({ kind: 'ready', connectedHint: '已连接电视端' });
       } catch {
         if (!cancelled) setPhase({ kind: 'invalid', message: '无法连接电视端服务，请确认在同一局域网' });
@@ -110,21 +131,21 @@ function RemoteContent() {
   }
 
   return (
-    <Shell>
+    <Shell pageName={caps.pageName}>
       <div className="flex items-center justify-center gap-1.5 text-xs text-faint mb-5" aria-live="polite">
         <span className={cn('w-1.5 h-1.5 rounded-full inline-block', sending ? 'bg-accent animate-pulse' : 'bg-success')} />
         {error ? <span className="text-danger">{error}</span> : phase.connectedHint}
       </div>
 
-      {/* 输入区：文字实时同步到电视搜索框 */}
+      {/* 输入区：文字实时同步到电视端当前页面的输入框 */}
       <div className="flex items-stretch min-h-12 rounded-xl border border-line bg-chip focus-within:border-accent focus-within:ring-1 focus-within:ring-accent/40 overflow-hidden">
         <input
           className="flex-1 min-w-0 px-4 bg-transparent text-base text-content placeholder:text-faint focus:outline-none"
-          placeholder="输入要搜索的片名…"
+          placeholder={caps.placeholder}
           value={text}
-          maxLength={100}
-          inputMode="search"
-          enterKeyHint="search"
+          maxLength={200}
+          inputMode={caps.inputMode}
+          enterKeyHint="go"
           onChange={(e) => {
             setText(e.target.value);
             // 首次挂载回显不推送；此后每次变化即时同步到电视端
@@ -156,7 +177,7 @@ function RemoteContent() {
         )}
       </div>
 
-      {/* 能力调用区：与 TV 端声明的能力一一对应 */}
+      {/* 能力调用区：按钮文案由 TV 端能力声明决定（搜索页=搜索，订阅页=同步订阅） */}
       <div className="mt-4 grid grid-cols-2 gap-3">
         <button
           className="btn-ghost py-3 text-sm"
@@ -164,7 +185,7 @@ function RemoteContent() {
           disabled={sending}
         >
           <Icon name="close" className="w-4 h-4" />
-          清空搜索框
+          {caps.clearLabel}
         </button>
         <button
           className="btn-primary py-3 text-sm font-medium"
@@ -172,19 +193,16 @@ function RemoteContent() {
           disabled={sending || !text.trim()}
         >
           <Icon name="search" className="w-4 h-4" />
-          电视端搜索
+          {caps.confirmLabel}
         </button>
       </div>
 
-      <p className="mt-6 text-center text-xs text-faint leading-relaxed">
-        输入内容会实时显示在电视搜索框上；<br />
-        点击「电视端搜索」立即在电视上发起搜索。
-      </p>
+      <p className="mt-6 text-center text-xs text-faint leading-relaxed">{caps.hint}</p>
     </Shell>
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Shell({ children, pageName }: { children: React.ReactNode; pageName?: string }) {
   return (
     <main className="min-h-screen bg-surface flex flex-col items-center justify-center px-4 py-10">
       <div className="w-full max-w-md">
@@ -193,6 +211,9 @@ function Shell({ children }: { children: React.ReactNode }) {
             <Icon name="remote" className="w-5 h-5 text-accent" />
             LibreTV 遥控
           </h1>
+          {pageName && pageName !== '搜索页' && (
+            <p className="mt-1 text-xs text-faint">当前页面：{pageName}</p>
+          )}
         </header>
         {children}
       </div>

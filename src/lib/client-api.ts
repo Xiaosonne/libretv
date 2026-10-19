@@ -330,8 +330,18 @@ export const api = {
     request<{ ok: boolean }>(`/api/user/favorites?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   /** 生成遥控输入配对码（TV 端调用；手机端以配对码作为凭证，无需登录） */
-  createRemotePair: () =>
-    request<{ pair: string; expiresAt: number }>('/api/remote/pair', { method: 'POST' }),
+  createRemotePair: (capabilities?: {
+    pageName: string;
+    placeholder: string;
+    confirmLabel: string;
+    clearLabel: string;
+    inputMode?: 'text' | 'url';
+    hint?: string;
+  }) =>
+    request<{ pair: string; expiresAt: number }>('/api/remote/pair', {
+      method: 'POST',
+      ...(capabilities ? { body: JSON.stringify({ capabilities }) } : {}),
+    }),
 
   /** —— 直播 / IPTV —— */
 

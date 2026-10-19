@@ -19,18 +19,40 @@ export interface RemoteEventHandlers {
   onClear: () => void;
 }
 
+/** TV 端声明的本页能力描述（手机端能力面板按此渲染） */
+export interface RemotePageCapabilities {
+  pageName: string;
+  placeholder: string;
+  confirmLabel: string;
+  clearLabel: string;
+  inputMode?: 'text' | 'url';
+  hint?: string;
+}
+
 type PairState =
   | { phase: 'creating' }
   | { phase: 'ready'; pair: string; qrDataUrl: string; expiresAt: number }
   | { phase: 'error'; message: string };
 
-export function RemotePairDialog({ onClose, handlers }: { onClose: () => void; handlers: RemoteEventHandlers }) {
+export function RemotePairDialog({
+  onClose,
+  handlers,
+  capabilities,
+}: {
+  onClose: () => void;
+  handlers: RemoteEventHandlers;
+  /** 省略时手机端渲染搜索页默认能力面板 */
+  capabilities?: RemotePageCapabilities;
+}) {
   const [state, setState] = useState<PairState>({ phase: 'creating' });
   const [connected, setConnected] = useState(false);
   const esRef = useRef<EventSource | null>(null);
   // handlers 随调用方每次渲染重建：事件回调经 ref 取最新值，SSE 只建立一次
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  // capabilities 同理：配对码只在弹窗挂载时生成一次，避免父组件重渲染触发重复配对
+  const capabilitiesRef = useRef(capabilities);
+  capabilitiesRef.current = capabilities;
 
   useEffect(() => {
     let cancelled = false;
@@ -38,7 +60,7 @@ export function RemotePairDialog({ onClose, handlers }: { onClose: () => void; h
 
     void (async () => {
       try {
-        const { pair } = await api.createRemotePair();
+        const { pair } = await api.createRemotePair(capabilitiesRef.current);
         const qrDataUrl = await QRCode.toDataURL(`${window.location.origin}/remote?pair=${pair}`, {
           margin: 1,
           width: 240,
@@ -143,12 +165,13 @@ export function RemotePairDialog({ onClose, handlers }: { onClose: () => void; h
   );
 }
 
-/** 搜索框旁的入口按钮 + 弹窗编排（供页面挂载） */
-export function useRemotePairing(handlers: RemoteEventHandlers) {
+/** 入口按钮 + 弹窗编排（供页面挂载）：capabilities 声明本页能力，手机端按声明渲染 */
+export function useRemotePairing(handlers: RemoteEventHandlers, capabilities?: RemotePageCapabilities) {
   const [open, setOpen] = useState(false);
   const openDialog = useCallback(() => setOpen(true), []);
   const closeDialog = useCallback(() => setOpen(false), []);
 
-  const dialog = open ? <RemotePairDialog onClose={closeDialog} handlers={handlers} /> : null;
+  // capabilities 相对静态：仅作为弹窗打开瞬间的初始值参与依赖判断
+  const dialog = open ? <RemotePairDialog onClose={closeDialog} handlers={handlers} capabilities={capabilities} /> : null;
   return { openDialog, dialog };
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Drawer } from './drawer';
 import { ConfirmDialog } from './confirm-dialog';
+import { useRemotePairing } from './remote-pair-dialog';
 import { Icon, type IconName } from './icon';
 import { LiveSourceManager } from './live-source-manager';
 import {
@@ -1011,6 +1012,32 @@ function SourceSubscriptions() {
   const [syncing, setSyncing] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
+  // 遥控输入：订阅 URL 在电视上打字最痛苦，扫码后手机输入实时同步进订阅框；
+  // 手机端主按钮即「同步订阅」（能力描述随配对码下发）
+  const remotePairing = useRemotePairing(
+    {
+      onInput: (text) => setSubUrl(text),
+      onSearch: (text) => {
+        const url = text.trim();
+        if (!validateSourceUrl(url)) {
+          toast('订阅地址需以 http:// 或 https:// 开头', 'warning');
+          return;
+        }
+        setSubUrl(url);
+        void sync(url);
+      },
+      onClear: () => setSubUrl(''),
+    },
+    {
+      pageName: '数据源订阅',
+      placeholder: '粘贴订阅链接（LibreTV 源列表 / TVBOX 配置 JSON）…',
+      confirmLabel: '同步订阅',
+      clearLabel: '清空输入框',
+      inputMode: 'url',
+      hint: '输入的订阅链接会实时显示在电视端输入框；点击「同步订阅」电视端将立即导入该订阅。',
+    },
+  );
+
   const sync = async (url: string) => {
     setSyncing((prev) => new Set(prev).add(url));
     try {
@@ -1210,6 +1237,16 @@ function SourceSubscriptions() {
             if (e.key === 'Enter') addAndSync();
           }}
         />
+        {/* 遥控输入：手机扫码后可直接把订阅链接发到本输入框（电视端打 URL 不便） */}
+        <button
+          type="button"
+          className="btn-ghost btn-sm shrink-0"
+          onClick={remotePairing.openDialog}
+          aria-label="手机遥控输入"
+          title="手机遥控输入：扫码后用手机把订阅链接填进输入框"
+        >
+          <Icon name="remote" className="w-4 h-4" />
+        </button>
         <button
           className="btn-primary btn-sm shrink-0"
           disabled={!subUrl.trim() || syncing.size > 0}
@@ -1217,6 +1254,7 @@ function SourceSubscriptions() {
         >
           {syncing.size > 0 ? '同步中…' : '订阅'}
         </button>
+        {remotePairing.dialog}
       </div>
       {store.subscriptions.length === 0 ? (
         <p className="text-xs text-faint">
