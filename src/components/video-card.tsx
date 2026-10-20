@@ -1,13 +1,48 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import type { QualityEntry, SearchResultItem, SourceConfig } from '@/lib/types';
 import { api } from '@/lib/client-api';
 import { useAppStore, readQualities } from '@/lib/store';
 import { QUALITY_FAIL_TTL_MS, qualityKey, qualityLabel } from '@/lib/quality';
 import { formatRemarks, inferGroupRemarks } from '@/lib/remarks';
+import { favoriteIdOf, toggleFavorite } from '@/lib/favorites';
+import { db } from '@/lib/db';
 import { cn } from '@/lib/utils';
 import { SmartImage } from './smart-image';
+
+/**
+ * 搜索结果卡片上的收藏按钮（封面右上角）。
+ * 搜索结果没有豆瓣 id，以标题为主键（n_标题）；是否剧集从分类名推断（影响片单图标与筛选）。
+ */
+function SearchFavoriteButton({ name, pic, typeName }: { name: string; pic?: string; typeName?: string }) {
+  const id = favoriteIdOf({ title: name });
+  const row = useLiveQuery(() => db.favorites.get(id), [id]);
+  const favorited = !!row;
+  const isTv = typeName ? /剧|综艺|动漫|动画|纪录|番/.test(typeName) : undefined;
+
+  return (
+    <button
+      type="button"
+      className={cn(
+        'absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-full flex items-center justify-center backdrop-blur-sm transition-colors',
+        favorited ? 'bg-accent text-on-accent' : 'bg-black/60 text-white/85 hover:text-accent'
+      )}
+      onClick={(e) => {
+        e.stopPropagation();
+        void toggleFavorite({ title: name, cover: pic, isTv });
+      }}
+      aria-label={favorited ? '从我的片单移除' : '加入我的片单'}
+      aria-pressed={favorited}
+      title={favorited ? '从我的片单移除' : '加入我的片单'}
+    >
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill={favorited ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={2} aria-hidden>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12Z" />
+      </svg>
+    </button>
+  );
+}
 
 // —— 跨源同名聚合 ——
 
@@ -304,6 +339,7 @@ export function AggregatedCard({
                 {group.items.length} 源
               </span>
             )}
+            <SearchFavoriteButton name={group.name} pic={group.pic} typeName={group.typeName} />
           </div>
         ) : (
           <div className="relative flex-shrink-0 w-[105px] sm:w-[120px] aspect-[2/3] bg-chip flex items-center justify-center">
@@ -315,6 +351,7 @@ export function AggregatedCard({
                 {group.items.length} 源
               </span>
             )}
+            <SearchFavoriteButton name={group.name} pic={group.pic} typeName={group.typeName} />
           </div>
         )}
 

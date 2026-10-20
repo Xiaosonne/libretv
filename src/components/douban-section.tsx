@@ -5,8 +5,8 @@ import { useQuery } from '@tanstack/react-query';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { api, type DoubanDetail } from '@/lib/client-api';
 import { useAppStore } from '@/lib/store';
-import { allFavorites, type FavoriteEntry } from '@/lib/db';
-import { toggleFavorite } from '@/lib/favorites';
+import { allFavorites, db } from '@/lib/db';
+import { favoriteIdOf, toggleFavorite } from '@/lib/favorites';
 import { cn } from '@/lib/utils';
 import type { DoubanItem } from '@/lib/types';
 import { DoubanCard } from './video-card';
@@ -20,14 +20,27 @@ const TV_TAGS = ['热门', '美剧', '英剧', '韩剧', '日剧', '国产剧', 
 const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
 /**
+ * 详情弹窗目标（推荐条目与片单条目的统一形态）：
+ * 有 doubanId 时按需拉豆瓣简介/演职员；无论豆瓣是否收录，「立即观看」始终可用。
+ */
+interface DetailTarget {
+  title: string;
+  cover?: string;
+  rating?: string;
+  isTv?: boolean;
+  doubanId?: string;
+}
+
+/**
  * 首页推荐区：顶部「推荐 / 我的片单」两个 tab。
- * - 推荐：数据源由设置决定（豆瓣热门 / Bangumi 新番放送 / 影视热榜）；
- * - 我的片单：本地 IndexedDB + 服务端云端同步（单密码部署全家共享），点击卡片看详情，点播放走搜索。
+ * - 推荐：数据源由设置决定（豆瓣热门 / Bangumi 新番放送 / 影视热榜），点卡片先看影片详情，再决定观看；
+ * - 我的片单：本地 IndexedDB + 服务端云端同步（单密码部署全家共享），点播放走搜索。
  */
 export function RecommendSection({ onPick }: { onPick: (title: string) => void }) {
   const doubanEnabled = useAppStore((s) => s.doubanEnabled);
   const recommendSource = useAppStore((s) => s.recommendSource);
   const [tab, setTab] = useState<'recommend' | 'favorites'>('recommend');
+  const [detail, setDetail] = useState<DetailTarget | null>(null);
 
   if (!doubanEnabled) return null;
 
@@ -47,11 +60,22 @@ export function RecommendSection({ onPick }: { onPick: (title: string) => void }
       {tab === 'favorites' ? (
         <FavoritesView onPlay={onPick} />
       ) : recommendSource === 'bangumi' ? (
-        <BangumiView onPick={onPick} />
+        <BangumiView onOpenDetail={setDetail} />
       ) : recommendSource === 'hot-list' ? (
-        <HotListView onPick={onPick} />
+        <HotListView onOpenDetail={setDetail} />
       ) : (
-        <DoubanView onPick={onPick} />
+        <DoubanView onOpenDetail={setDetail} />
+      )}
+
+      {detail && (
+        <ItemDetailModal
+          target={detail}
+          onClose={() => setDetail(null)}
+          onWatch={(title) => {
+            setDetail(null);
+            onPick(title);
+          }}
+        />
       )}
     </section>
   );
@@ -63,8 +87,16 @@ function useFavoriteIds(): Set<string> {
   return useMemo(() => new Set((favorites ?? []).map((f) => f.id)), [favorites]);
 }
 
-/** 推荐条目网格：卡片带收藏按钮（豆瓣条目以 subject id 为主键） */
-function RecommendGrid({ items, onPick, favoriteIds }: { items: DoubanItem[]; onPick: (t: string) => void; favoriteIds: Set<string> }) {
+/** 推荐条目网格：卡片带收藏按钮（豆瓣条目以 subject id 为主键）；点击卡片打开影片详情 */
+function RecommendGrid({
+  items,
+  onOpenDetail,
+  favoriteIds,
+}: {
+  items: DoubanItem[];
+  onOpenDetail: (target: DetailTarget) => void;
+  favoriteIds: Set<string>;
+}) {
   return (
     <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2.5">
       {items.map((item) => (
@@ -81,7 +113,9 @@ function RecommendGrid({ items, onPick, favoriteIds }: { items: DoubanItem[]; on
               isTv: item.isTv,
             })
           }
-          onClick={() => onPick(item.title)}
+          onClick={() =>
+            onOpenDetail({ title: item.title, cover: item.cover, rating: item.rating, isTv: item.isTv, doubanId: item.id })
+          }
         />
       ))}
     </div>
@@ -93,7 +127,7 @@ function RecommendGrid({ items, onPick, favoriteIds }: { items: DoubanItem[]; on
  * 一次性渲染全部条目：数据本就一次拉全（50 条），卡片图片又是 lazy 加载，
  * 视口外的图不会请求，因此不需要「加载更多」这类本地切片分页来打断浏览。
  */
-function DoubanView({ onPick }: { onPick: (title: string) => void }) {
+function DoubanView({ onOpenDetail }: { onOpenDetail: (target: DetailTarget) => void }) {
   const [type, setType] = useState<'movie' | 'tv'>('movie');
   const [tag, setTag] = useState('热门');
   const favoriteIds = useFavoriteIds();
@@ -149,14 +183,14 @@ function DoubanView({ onPick }: { onPick: (title: string) => void }) {
       ) : items.length === 0 ? (
         <p className="text-center text-sm text-faint py-8">该分类暂无推荐内容</p>
       ) : (
-        <RecommendGrid items={items} onPick={onPick} favoriteIds={favoriteIds} />
+        <RecommendGrid items={items} onOpenDetail={onOpenDetail} favoriteIds={favoriteIds} />
       )}
     </div>
   );
 }
 
 /** Bangumi 每日放送：星期筛选，一次拉全量无分页 */
-function BangumiView({ onPick }: { onPick: (title: string) => void }) {
+function BangumiView({ onOpenDetail }: { onOpenDetail: (target: DetailTarget) => void }) {
   const [weekday, setWeekday] = useState<number | 'all'>('all');
   const favoriteIds = useFavoriteIds();
 
@@ -190,7 +224,7 @@ function BangumiView({ onPick }: { onPick: (title: string) => void }) {
       ) : query.isLoading ? (
         <GridSkeleton />
       ) : (
-        <RecommendGrid items={items} onPick={onPick} favoriteIds={favoriteIds} />
+        <RecommendGrid items={items} onOpenDetail={onOpenDetail} favoriteIds={favoriteIds} />
       )}
     </div>
   );
@@ -206,7 +240,7 @@ const HOT_LISTS = [
 ];
 
 /** 影视热榜（60s API）：豆瓣五个周榜 + 百度热播剧，chips 切换 */
-function HotListView({ onPick }: { onPick: (title: string) => void }) {
+function HotListView({ onOpenDetail }: { onOpenDetail: (target: DetailTarget) => void }) {
   const [listId, setListId] = useState(HOT_LISTS[0].id);
   const favoriteIds = useFavoriteIds();
 
@@ -232,16 +266,16 @@ function HotListView({ onPick }: { onPick: (title: string) => void }) {
       ) : query.isLoading ? (
         <GridSkeleton />
       ) : (
-        <RecommendGrid items={items} onPick={onPick} favoriteIds={favoriteIds} />
+        <RecommendGrid items={items} onOpenDetail={onOpenDetail} favoriteIds={favoriteIds} />
       )}
     </div>
   );
 }
 
-/** 我的片单：点击卡片打开详情（简介/演职员），点「播放」再走搜索流程 */
+/** 我的片单：点击卡片打开详情（简介/演职员），点「立即观看」再走搜索流程 */
 function FavoritesView({ onPlay }: { onPlay: (title: string) => void }) {
   const favorites = useLiveQuery(() => allFavorites(), []);
-  const [detail, setDetail] = useState<FavoriteEntry | null>(null);
+  const [detail, setDetail] = useState<DetailTarget | null>(null);
 
   if (favorites === undefined) return <GridSkeleton />;
   if (favorites.length === 0) {
@@ -272,16 +306,18 @@ function FavoritesView({ onPlay }: { onPlay: (title: string) => void }) {
                 isTv: f.isTv,
               })
             }
-            onClick={() => setDetail(f)}
+            onClick={() =>
+              setDetail({ title: f.title, cover: f.cover, rating: f.rating, isTv: f.isTv, doubanId: f.doubanId })
+            }
           />
         ))}
       </div>
 
       {detail && (
-        <FavoriteDetailModal
-          entry={detail}
+        <ItemDetailModal
+          target={detail}
           onClose={() => setDetail(null)}
-          onPlay={(title) => {
+          onWatch={(title) => {
             setDetail(null);
             onPlay(title);
           }}
@@ -292,49 +328,50 @@ function FavoritesView({ onPlay }: { onPlay: (title: string) => void }) {
 }
 
 /**
- * 片单详情弹窗：条目本身只有标题/封面/评分，有豆瓣 id 时按需拉取
- * 简介/年份/地区/类型/演职员补全；拉取失败降级展示基本信息，不阻断播放。
+ * 影片详情弹窗（推荐 / 片单共用）：
+ * - 有豆瓣 id 时按需拉取简介/年份/地区/类型/演职员；
+ * - 豆瓣未收录或反爬失败时降级为基本信息，不影响观看——主按钮永远是「立即观看」；
+ * - 收藏按钮自包含：按 doubanId/标题查本地收藏态，推荐与片单两个入口行为一致。
  */
-function FavoriteDetailModal({
-  entry,
+function ItemDetailModal({
+  target,
   onClose,
-  onPlay,
+  onWatch,
 }: {
-  entry: FavoriteEntry;
+  target: DetailTarget;
   onClose: () => void;
-  onPlay: (title: string) => void;
+  onWatch: (title: string) => void;
 }) {
   const { toast } = useToast();
   const imageProxyMode = useAppStore((s) => s.imageProxyMode);
   const customImageProxy = useAppStore((s) => s.customImageProxy);
   const [imgFailed, setImgFailed] = useState(false);
 
+  const favId = favoriteIdOf(target);
+  const favoriteRow = useLiveQuery(() => db.favorites.get(favId), [favId]);
+  const favorited = !!favoriteRow;
+
   const detailQuery = useQuery({
-    queryKey: ['douban-detail', entry.doubanId],
-    queryFn: ({ signal }) => api.doubanDetail(entry.doubanId!, signal),
-    enabled: !!entry.doubanId,
+    queryKey: ['douban-detail', target.doubanId],
+    queryFn: ({ signal }) => api.doubanDetail(target.doubanId!, signal),
+    enabled: !!target.doubanId,
     staleTime: 24 * 60 * 60 * 1000,
     retry: false,
   });
   const d: DoubanDetail | undefined = detailQuery.data;
+  const detailUnavailable = !target.doubanId || detailQuery.isError;
 
-  const rating = entry.rating ?? d?.rating;
-  const cover = entry.cover || d?.cover;
+  const rating = target.rating ?? d?.rating;
+  const cover = target.cover || d?.cover;
 
-  const play = () => {
-    onPlay(entry.title);
-  };
-
-  const remove = () => {
+  const toggleFav = () => {
     void toggleFavorite({
-      id: entry.id,
-      doubanId: entry.doubanId,
-      title: entry.title,
-      cover: entry.cover,
-      rating: entry.rating,
-      isTv: entry.isTv,
-    }).then(() => toast(`已从片单移除「${entry.title}」`, 'info'));
-    onClose();
+      doubanId: target.doubanId,
+      title: target.title,
+      cover: target.cover,
+      rating: target.rating,
+      isTv: target.isTv,
+    }).then(() => toast(favorited ? `已从片单移除「${target.title}」` : `已加入片单「${target.title}」`, 'info'));
   };
 
   const metaParts = [d?.year, d?.region, d?.genres?.join(' / ')].filter(Boolean) as string[];
@@ -344,7 +381,7 @@ function FavoriteDetailModal({
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-label={`片单详情：${entry.title}`}
+      aria-label={`影片详情：${target.title}`}
     >
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
       <div className="relative bg-surface rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto shadow-xl animate-fade-in">
@@ -363,7 +400,7 @@ function FavoriteDetailModal({
                 url={cover}
                 mode={imageProxyMode}
                 customProxy={customImageProxy}
-                alt={entry.title}
+                alt={target.title}
                 className="w-full h-full object-cover"
                 onExhausted={() => setImgFailed(true)}
               />
@@ -375,7 +412,7 @@ function FavoriteDetailModal({
           </div>
 
           <div className="flex-1 min-w-0">
-            <h2 className="text-base font-semibold text-content pr-8">{entry.title}</h2>
+            <h2 className="text-base font-semibold text-content pr-8">{target.title}</h2>
             {rating && (
               <p className="mt-1 text-sm text-rating font-medium" title="豆瓣评分">
                 ★ {rating}
@@ -402,19 +439,22 @@ function FavoriteDetailModal({
             </p>
           ) : d?.summary ? (
             <p className="text-xs text-muted leading-relaxed">{d.summary}</p>
-          ) : detailQuery.isError ? (
-            <p className="text-xs text-faint py-2">暂无简介（豆瓣详情获取失败，不影响播放）</p>
+          ) : detailUnavailable ? (
+            <p className="text-xs text-faint py-2 leading-relaxed">
+              {target.doubanId ? '豆瓣详情暂未获取到（可能被反爬拦截）。' : '豆瓣未收录此条目。'}
+              可直接点击下方按钮搜索全网片源。
+            </p>
           ) : null}
         </div>
 
         <div className="flex items-center gap-2 p-4 pt-2 border-t border-line">
-          <button className="btn-primary flex-1" onClick={play}>
+          <button className="btn-primary flex-1" onClick={() => onWatch(target.title)}>
             <Icon name="play" className="w-4 h-4" />
-            播放
+            立即观看（搜片源）
           </button>
-          <button className="btn-ghost" onClick={remove}>
-            <Icon name="trash" className="w-4 h-4" />
-            移除收藏
+          <button className="btn-ghost" onClick={toggleFav} aria-pressed={favorited}>
+            <Icon name="heart" className="w-4 h-4" />
+            {favorited ? '移除收藏' : '收藏'}
           </button>
         </div>
       </div>
