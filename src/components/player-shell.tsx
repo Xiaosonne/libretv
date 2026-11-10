@@ -14,6 +14,19 @@ import { loadCacheSettings } from '@/lib/video-cache';
 import { formatTime } from '@/lib/utils';
 
 /**
+ * iOS 全系浏览器（含 iOS 版 Chrome/Edge，内核均为 WebKit）原生支持 HLS，
+ * 且能硬件解码 H.264/H.265；而 hls.js 的 MSE 路径在 iOS Safari 上对 H.265
+ * 视频轨解不出来，表现为「进度条在走、黑屏无声画」。iOS 一律改走原生 HLS。
+ * iPadOS 13+ 默认伪装 Mac UA，用 maxTouchPoints 识别。
+ */
+export function shouldUseNativeHls(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+}
+
+/**
  * 播放器外壳：ArtPlayer + hls.js（旧版 player.js 的 React 化）。
  * 保留：广告分片过滤、自动连播回调、进度回调、快捷键、移动端长按倍速、错误恢复。
  * 移除：DOM 手工操作、watch.html 跳转链、localStorage 状态总线。
@@ -67,6 +80,9 @@ export function PlayerShell({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const artRef = useRef<any>(null);
   const hlsRef = useRef<Hls | null>(null);
+  // 原生 HLS 模式（iOS）：true 时预取跳过、video:error 的 hls 自愈跳过（原生路径自理）
+  const nativeModeRef = useRef(false);
+  const nativeCleanupRef = useRef<(() => void) | null>(null);
   const [error, setError] = useState('');
   const [hint, setHint] = useState('');
   // 起播前的品牌占位图（沿用旧版 nomedia 素材），实际开始播放后隐藏
@@ -142,7 +158,8 @@ export function PlayerShell({
   // 当前集预取（episodeKey 缺省 = 关闭，见 ensure 内部 settings.enabled 判断）
   const ensurePrefetch = (mediaUrl: string, currentTime: number, horizonSeconds?: number) => {
     const p = propsRef.current;
-    if (!p.episodeKey) return;
+    // 原生 HLS（iOS）不经 loader 拉流，预取缓存无法命中，直接跳过省流量
+    if (!p.episodeKey || nativeModeRef.current) return;
     getVideoPrefetcher().ensure({
       m3u8Url: mediaUrl,
       currentTime,
@@ -162,19 +179,8 @@ export function PlayerShell({
     });
   };
 
-  /**
-   * 初始化/切换 HLS。allowProxyFallback：直连致命网络错误（CORS/防盗链/分片被拒）时，
-   * 自动改走同源 cookie 鉴权的 /api/proxy 重试一次。
-   * 注意：不销毁 ArtPlayer，只销毁并重建 hls，从而保留网页全屏等播放器状态。
-   */
-  const setupHls = (video: HTMLVideoElement, mediaUrl: string, allowProxyFallback: boolean) => {
-    restoreCleanupRef.current?.();
-    restoreCleanupRef.current = null;
-    hlsRef.current?.destroy();
-    currentMediaUrlRef.current = mediaUrl;
-    const hls = new Hls(buildHlsConfig());
-    hlsRef.current = hls;
-
+  /** 进度恢复监视（hls.js 与原生 HLS 共用）：时长就绪后从上次位置续播；返回恢复入口供 hls 事件提前触发 */
+  const attachRestore = (video: HTMLVideoElement, mediaUrl: string) => {
     let restoreInFlight = false;
     const restoreAndStart = async () => {
       if (restoredRef.current || restoreInFlight) return;
@@ -212,6 +218,80 @@ export function PlayerShell({
     restoreCleanupRef.current = () => {
       restoreEvents.forEach((event) => video.removeEventListener(event, onRestoreEvent));
     };
+    return restoreAndStart;
+  };
+
+  /**
+   * 原生 HLS（iOS Safari / iOS 版第三方浏览器）路径：video.src 直连播放。
+   * Safari 硬解 H.264/H.265，规避 hls.js MSE 路径的「黑屏有声」假死。
+   * 代价：广告过滤、片段预取不生效（loader 层能力）；直连失败时退一次
+   * 同源代理（源拒绝 Safari 请求的兜底），仅一次不再无限重试。
+   */
+  const setupNativeHls = (video: HTMLVideoElement, mediaUrl: string, allowProxyFallback: boolean) => {
+    restoreCleanupRef.current?.();
+    restoreCleanupRef.current = null;
+    nativeCleanupRef.current?.();
+    nativeCleanupRef.current = null;
+    hlsRef.current?.destroy();
+    hlsRef.current = null;
+    nativeModeRef.current = true;
+    currentMediaUrlRef.current = mediaUrl;
+
+    // moreVideoAttr 设置的 crossOrigin='anonymous' 会让 Safari 对媒体分片强制 CORS
+    // 校验，不少源不回 CORS 头会直接加载失败；video.src 原生播放本身不受同源限制
+    video.removeAttribute('crossorigin');
+    video.src = mediaUrl;
+
+    attachRestore(video, mediaUrl);
+
+    const onError = () => {
+      mediaHealthyRef.current = false;
+      if (!playbackStartedRef.current && allowProxyFallback && !mediaUrl.startsWith('/api/proxy')) {
+        showHint('直连失败，改用代理重试...');
+        setupNativeHls(video, `/api/proxy?url=${encodeURIComponent(mediaUrl)}`, false);
+        return;
+      }
+      const message = '视频加载失败';
+      if (playbackStartedRef.current) {
+        showHint(message);
+        propsRef.current.onRequestSwitchSource?.(message);
+      } else {
+        setError(`${message}，请尝试其他视频源`);
+      }
+    };
+    const onPlaying = () => { mediaHealthyRef.current = true; };
+    video.addEventListener('error', onError);
+    video.addEventListener('playing', onPlaying);
+    nativeCleanupRef.current = () => {
+      video.removeEventListener('error', onError);
+      video.removeEventListener('playing', onPlaying);
+      video.removeAttribute('src');
+      video.load();
+    };
+  };
+
+  /**
+   * 初始化/切换 HLS。allowProxyFallback：直连致命网络错误（CORS/防盗链/分片被拒）时，
+   * 自动改走同源 cookie 鉴权的 /api/proxy 重试一次。
+   * 注意：不销毁 ArtPlayer，只销毁并重建 hls，从而保留网页全屏等播放器状态。
+   */
+  const setupHls = (video: HTMLVideoElement, mediaUrl: string, allowProxyFallback: boolean) => {
+    // iOS 全系浏览器走原生 HLS：硬解 H.264/H.265，规避 hls.js MSE 黑屏（详见 setupNativeHls）
+    if (shouldUseNativeHls()) {
+      setupNativeHls(video, mediaUrl, allowProxyFallback);
+      return;
+    }
+    nativeModeRef.current = false;
+    restoreCleanupRef.current?.();
+    restoreCleanupRef.current = null;
+    nativeCleanupRef.current?.();
+    nativeCleanupRef.current = null;
+    hlsRef.current?.destroy();
+    currentMediaUrlRef.current = mediaUrl;
+    const hls = new Hls(buildHlsConfig());
+    hlsRef.current = hls;
+
+    const restoreAndStart = attachRestore(video, mediaUrl);
 
     hls.loadSource(mediaUrl);
     hls.attachMedia(video);
@@ -386,6 +466,9 @@ export function PlayerShell({
     });
     art.on('video:error', () => {
       mediaHealthyRef.current = false;
+      // 原生 HLS（iOS）路径的错误由 setupNativeHls 挂的原生 error 监听处理，
+      // 这里若再走「重建 hls」自愈会与原生分支互相覆盖 src
+      if (nativeModeRef.current) return;
       // 起播阶段的 video 元素级错误（MSE/解码偶发失败）：重建一次播放链路自愈，
       // 而不是直接钉死错误遮罩——重建后视频轨重新 append，黑屏有声即可解除
       if (!playbackStartedRef.current && !videoErrorRetryUsedRef.current) {
@@ -555,6 +638,8 @@ export function PlayerShell({
       restoreCleanupRef.current?.();
       restoreCleanupRef.current = null;
       Artplayer.CONTROL_HIDE_TIME = previousControlHideTime;
+      nativeCleanupRef.current?.();
+      nativeCleanupRef.current = null;
       hlsRef.current?.destroy();
       hlsRef.current = null;
       recoveryRef.current?.dispose();
